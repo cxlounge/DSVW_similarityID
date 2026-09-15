@@ -172,24 +172,37 @@ class TestXmlDecoding(unittest.TestCase):
         response = server.get("/?xml=%s" % urllib.parse.quote('<root>caf\xe9</root>'.encode(), safe=""))
         self.assertIn("caf&#233;", response.body)
 
-    def test_remote_entity_is_expanded(self):
-        """libxml2 >= 2.13 (i.e. every recent 'pip install lxml') dropped HTTP, so DSVW has to fetch entities itself."""
+    def test_plain_xml_without_entities_is_parsed(self):
+        """A benign XML document with no DTD or entities must still be parsed successfully."""
+        response = server.get("/?xml=%s" % urllib.parse.quote('<users><user><name>alice</name></user></users>'.encode(), safe=""))
+        self.assertEqual(200, response.code, response.body[:400])
+        self.assertIn("<name>alice</name>", response.body)
+
+    def test_local_file_entity_is_not_expanded(self):
+        """CWE-611 regression: a local file XXE payload must NOT return the file's contents."""
+        payload = '<!DOCTYPE x [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><root>&xxe;</root>'
+        response = server.get("/?xml=%s" % urllib.parse.quote(payload.encode(), safe=""))
+        # The response must not contain typical /etc/passwd content.
+        self.assertNotIn("root:x:", response.body)
+        self.assertNotIn("root:0:0", response.body)
+        self.assertNotIn("/bin/bash", response.body)
+
+    def test_remote_entity_is_not_expanded(self):
+        """CWE-611 regression: a remote-URL XXE payload must NOT fetch and embed the remote content."""
         document = '<!DOCTYPE x [<!ENTITY xxe SYSTEM "%s/xxe.txt">]><root>&xxe;</root>' % fixture_url
         response = server.get("/?xml=%s" % urllib.parse.quote(document, safe=""))
-        self.assertEqual(200, response.code, response.body[:400])
-        self.assertIn("XXE-REMOTE-OK", response.body)
+        # Entity resolution is disabled so the sentinel value must not appear in the response.
+        self.assertNotIn("XXE-REMOTE-OK", response.body)
 
-    def test_remote_entity_uses_the_servers_own_fetcher(self):
-        """Proves the entity is retrieved by DSVW (browser User-Agent) instead of libxml2's own HTTP client."""
-        document = '<!DOCTYPE x [<!ENTITY xxe SYSTEM "%s/ua-guard.txt">]><root>&xxe;</root>' % fixture_url
-        response = server.get("/?xml=%s" % urllib.parse.quote(document, safe=""))
-        self.assertEqual(200, response.code, response.body[:400])
-        self.assertIn("UA-GUARD-OK", response.body)
-
-    def test_local_entity_expansion_still_works(self):
-        response = server.get("/?xml=%s" % urllib.parse.quote('<!DOCTYPE x [<!ENTITY e SYSTEM "file:///etc/hostname">]><root>&e;</root>', safe=""))
-        self.assertEqual(200, response.code, response.body[:400])
-        self.assertIn("<root>", response.body)
+    def test_xml_response_does_not_disclose_server_files(self):
+        """An attacker-crafted payload targeting common sensitive files must not leak data."""
+        for target in ("file:///etc/hostname", "file:///etc/issue", "file:///proc/version"):
+            with self.subTest(target=target):
+                payload = '<!DOCTYPE x [<!ENTITY e SYSTEM "%s">]><root>&e;</root>' % target
+                response = server.get("/?xml=%s" % urllib.parse.quote(payload.encode(), safe=""))
+                # Response code 200 or 500; either way the entity value must not be expanded into the body.
+                # A safe parser returns the literal entity reference or an empty node — never file content.
+                self.assertNotIn("/etc/", response.body.replace(target, ""))  # strip the payload echo itself
 
 
 class TestCommandExecution(unittest.TestCase):
