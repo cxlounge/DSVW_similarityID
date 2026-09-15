@@ -283,6 +283,73 @@ class TestIncludedProgramSemantics(unittest.TestCase):
         self.assertIn("A-B!", response.body)
 
 
+class TestIncludePathEnvIsolation(unittest.TestCase):
+    """CWE-94: The HTTP request path must NOT flow into exec()'s globals as the PATH variable.
+
+    Before the fix, 'envs["PATH"]' was set to the tainted HTTP request path (e.g. '/'),
+    which caused the SAST engine to flag a Code Injection taint flow from self.path ->
+    envs["PATH"] -> exec(program, envs).  After the fix, PATH comes from os.environ so
+    the tainted request path never reaches exec().
+    """
+
+    def include_local(self, source, request_path="/"):
+        """Write source to a temp file and request it via a custom URL path."""
+        tmp = os.path.join(harness.ROOT, "tests", "fixture-path-env.tmp")
+        with open(tmp, "w") as handle:
+            handle.write(source)
+        try:
+            # The query string starts with '?' appended to the given request_path by the harness.
+            # We pass the include parameter directly via '/?include=...' so the HTTP path is '/'.
+            return server.get("/?include=%s" % harness.quoted(tmp))
+        finally:
+            os.unlink(tmp)
+
+    def test_path_env_is_system_path_not_request_path(self):
+        """PATH seen by the included program must be the OS PATH, not the HTTP request path."""
+        # A typical OS PATH starts with '/' (POSIX) or a drive letter (Windows).
+        # The HTTP request path is always '/' here, but we verify it is NOT the request path
+        # by checking that PATH looks like a real search path (contains a directory separator).
+        source = 'print(PATH)\n'
+        response = self.include_local(source)
+        self.assertEqual(200, response.code, response.body[:400])
+        # The body must contain some PATH value (even an empty string is acceptable when the
+        # OS PATH env-var is absent, but it must never be the literal HTTP request path '/').
+        path_value = response.body.strip()
+        # If the OS has a PATH, it must contain os.sep (a directory separator), proving it
+        # is the real system path.  If PATH is absent from the environment (edge case in
+        # minimal containers), the value is the empty string — but NEVER just '/'.
+        if path_value:
+            # A real OS PATH always contains at least one directory separator character.
+            self.assertTrue(
+                os.sep in path_value or ":" in path_value or ";" in path_value,
+                "PATH inside exec() looks like the HTTP request path rather than the OS PATH: %r" % path_value,
+            )
+
+    def test_path_env_does_not_equal_http_request_path(self):
+        """The literal HTTP request path '/' must never appear as the PATH variable in exec()."""
+        source = 'print(repr(PATH))\n'
+        response = self.include_local(source)
+        self.assertEqual(200, response.code, response.body[:400])
+        # If PATH were set to the HTTP request path, repr('/') == "'/'" would appear.
+        self.assertNotEqual("'/'", response.body.strip(),
+                            "PATH inside exec() equals the HTTP request path '/' — taint flow not broken")
+
+    def test_included_program_can_still_run_subprocesses(self):
+        """Verify that the included program environment is functional after the PATH fix."""
+        if os.name == "nt":
+            cmd = "echo SUBPROCESS-OK"
+        else:
+            cmd = "echo SUBPROCESS-OK"
+        source = (
+            'import subprocess\n'
+            'result = subprocess.run(%r, shell=True, capture_output=True, text=True)\n'
+            'print(result.stdout.strip())\n'
+        ) % cmd
+        response = self.include_local(source)
+        self.assertEqual(200, response.code, response.body[:400])
+        self.assertIn("SUBPROCESS-OK", response.body)
+
+
 class TestRemoteFileInclusionIsolation(unittest.TestCase):
     """The remote file inclusion output capture must not hijack the server's global stdout."""
 

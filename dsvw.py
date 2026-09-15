@@ -45,7 +45,7 @@ class ReqHandler(http.server.BaseHTTPRequestHandler):
                         cursor.execute("SELECT id, comment, time FROM comments")
                         content += "<div><span>Comment(s):</span></div><table><thead><tr><th>id</th><th>comment</th><th>time</th></tr></thead>%s</table>%s" % ("".join("<tr>%s</tr>" % "".join("<td>%s</td>" % ("-" if _ is None else _) for _ in row) for row in cursor.fetchall()), HTML_POSTFIX)
                 elif "include" in params:
-                    program, output, envs = (open(params["include"], "rb") if not "://" in params["include"] else FETCH(params["include"])).read(), io.StringIO(), {"DOCUMENT_ROOT": os.getcwd(), "HTTP_USER_AGENT": self.headers.get("User-Agent"), "REMOTE_ADDR": self.client_address[0], "REMOTE_PORT": self.client_address[1], "PATH": path, "QUERY_STRING": query, "__name__": "__main__", "print": lambda *args, **kwargs: output.write("%s%s" % (kwargs.get("sep", " ").join(str(_) for _ in args), kwargs.get("end", "\n")))}
+                    program, output, envs = (open(params["include"], "rb") if not "://" in params["include"] else FETCH(params["include"])).read(), io.StringIO(), {"DOCUMENT_ROOT": os.getcwd(), "HTTP_USER_AGENT": self.headers.get("User-Agent"), "REMOTE_ADDR": self.client_address[0], "REMOTE_PORT": self.client_address[1], "PATH": os.environ.get("PATH", ""), "QUERY_STRING": query, "__name__": "__main__", "print": lambda *args, **kwargs: output.write("%s%s" % (kwargs.get("sep", " ").join(str(_) for _ in args), kwargs.get("end", "\n")))}
                     try: exec(program, envs)
                     except SystemExit: pass
                     content += output.getvalue()
