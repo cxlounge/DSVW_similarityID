@@ -100,16 +100,50 @@ class TestParameterParsing(unittest.TestCase):
 
 
 class TestReflectedVersion(unittest.TestCase):
-    def test_backslash_payloads_are_reflected_verbatim(self):
-        for payload, expected in (("0.4\\9", "v<b>0.4\\9</b>"), ("\\g<foo>", "v<b>\\g<foo></b>"), ("0.4\\", "v<b>0.4\\</b>"), ("a\\\\b", "v<b>a\\\\b</b>")):
+    def test_backslash_payloads_are_reflected_with_html_escaping(self):
+        """Backslashes are safe and pass through unchanged; angle brackets in ?v are HTML-escaped."""
+        import html as _html
+        for payload, expected in (
+            ("0.4\\9", "v<b>0.4\\9</b>"),
+            ("\\g<foo>", "v<b>%s</b>" % _html.escape("\\g<foo>")),  # angle brackets escaped
+            ("0.4\\", "v<b>0.4\\</b>"),
+            ("a\\\\b", "v<b>a\\\\b</b>"),
+        ):
             with self.subTest(payload=payload):
                 response = server.get("/?v=%s" % harness.quoted(payload))
                 self.assertEqual(200, response.code, response.body[:800])
                 self.assertIn(expected, response.body)
 
-    def test_script_payload_is_reflected(self):
+    def test_script_payload_is_html_escaped(self):
+        """Reflected XSS fix: the ?v parameter must be HTML-escaped before embedding."""
         payload = '<script>alert("xss")</script>'
-        self.assertIn("v<b>0.4%s</b>" % payload, server.get("/?v=%s" % harness.quoted("0.4" + payload)).body)
+        response = server.get("/?v=%s" % harness.quoted("0.4" + payload))
+        self.assertEqual(200, response.code, response.body[:800])
+        # The raw script tag must NOT appear in the response
+        self.assertNotIn(payload, response.body)
+        # The escaped form must appear instead
+        import html as _html
+        self.assertIn("v<b>0.4%s</b>" % _html.escape(payload), response.body)
+
+    def test_xss_angle_brackets_are_escaped(self):
+        """HTML angle brackets in ?v must be entity-encoded, not rendered as tags."""
+        for payload, escaped in (
+            ("<b>bold</b>", "&lt;b&gt;bold&lt;/b&gt;"),
+            ("<img src=x onerror=alert(1)>", "&lt;img src=x onerror=alert(1)&gt;"),
+            ('"><script>alert(1)</script>', "&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;"),
+        ):
+            with self.subTest(payload=payload):
+                response = server.get("/?v=%s" % harness.quoted(payload))
+                self.assertEqual(200, response.code, response.body[:800])
+                self.assertNotIn(payload, response.body)
+                self.assertIn(escaped, response.body)
+
+    def test_xss_ampersand_is_escaped(self):
+        """Ampersands in ?v must be entity-encoded."""
+        payload = "a&b"
+        response = server.get("/?v=%s" % harness.quoted(payload))
+        self.assertEqual(200, response.code, response.body[:800])
+        self.assertIn("v<b>a&amp;b</b>", response.body)
 
     def test_footer_stays_at_the_end_of_the_page(self):
         response = server.get("/?v=0.4")
