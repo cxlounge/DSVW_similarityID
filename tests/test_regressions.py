@@ -407,6 +407,107 @@ class TestComments(unittest.TestCase):
         self.assertIn("Thank you for leaving the comment", server.get("/?comment=another").body)
 
 
+class TestStoredXssRemediation(unittest.TestCase):
+    """Regression suite for CWE-79 Stored XSS via the comments table.
+
+    Comments are stored verbatim but MUST be HTML-escaped when rendered in the
+    listing page so that a browser never interprets them as markup or script.
+    """
+
+    def _insert(self, payload):
+        """Submit a comment payload and return the insert-confirmation response."""
+        return server.get("/?comment=%s" % harness.quoted(payload))
+
+    def _listing(self):
+        """Return the comments listing page."""
+        return server.get("/?comment=")
+
+    def test_script_tag_payload_is_escaped_not_executed(self):
+        """A <script> comment must appear HTML-encoded in the listing, never as raw markup."""
+        payload = '<script>alert("xss-regression")</script>'
+        self._insert(payload)
+        response = self._listing()
+        self.assertEqual(200, response.code)
+        # Raw payload must NOT appear verbatim (would be parsed and executed by the browser)
+        self.assertNotIn(payload, response.body)
+        # HTML-encoded form must be present so the text is displayed safely
+        self.assertIn("&lt;script&gt;", response.body)
+        self.assertIn("&lt;/script&gt;", response.body)
+
+    def test_event_handler_attribute_payload_is_escaped(self):
+        """An onclick/onerror attribute injection must not survive into the rendered HTML."""
+        payload = '" onclick="alert(1)'
+        self._insert(payload)
+        response = self._listing()
+        self.assertEqual(200, response.code)
+        # The double-quote that would break out of the <td> attribute context must be encoded
+        self.assertNotIn('" onclick="alert(1)', response.body)
+        self.assertIn("&quot;", response.body)
+
+    def test_img_onerror_payload_is_escaped(self):
+        """<img onerror=…> is a classic XSS vector; it must be encoded in the listing."""
+        payload = '<img src=x onerror=alert(1)>'
+        self._insert(payload)
+        response = self._listing()
+        self.assertEqual(200, response.code)
+        self.assertNotIn('<img src=x onerror=alert(1)>', response.body)
+        self.assertIn("&lt;img", response.body)
+
+    def test_angle_brackets_are_encoded(self):
+        """Any < or > in a comment must be encoded as &lt; / &gt; in the rendered table cell."""
+        payload = '<b>bold</b>'
+        self._insert(payload)
+        response = self._listing()
+        self.assertEqual(200, response.code)
+        self.assertNotIn('<b>bold</b>', response.body)
+        self.assertIn("&lt;b&gt;bold&lt;/b&gt;", response.body)
+
+    def test_ampersand_is_encoded(self):
+        """& must be encoded as &amp; to prevent entity injection."""
+        payload = 'AT&T &amp; friends'
+        self._insert(payload)
+        response = self._listing()
+        self.assertEqual(200, response.code)
+        # html.escape encodes & -> &amp; so 'AT&T' in the raw payload -> 'AT&amp;T' in body
+        self.assertIn("AT&amp;T", response.body)
+
+    def test_plain_text_comment_is_still_displayed(self):
+        """Ordinary text comments must remain readable after escaping."""
+        payload = 'Hello, world! This is a normal comment.'
+        self._insert(payload)
+        response = self._listing()
+        self.assertEqual(200, response.code)
+        self.assertIn(payload, response.body)
+
+    def test_comment_listing_page_is_valid_html(self):
+        """After escaping, the listing page must still be a complete HTML document."""
+        self._insert('<div class="injected">text</div>')
+        response = self._listing()
+        self.assertEqual(200, response.code)
+        self.assertTrue(response.body.startswith("<!DOCTYPE html>"))
+        self.assertIn("Comment(s)", response.body)
+        self.assertTrue(response.body.rstrip().endswith("</html>"))
+
+    def test_multiple_xss_payloads_all_escaped(self):
+        """All stored comments with XSS payloads must be escaped on the listing page."""
+        payloads = [
+            '<script>alert(1)</script>',
+            '"><svg onload=alert(2)>',
+            "';alert(String.fromCharCode(88,83,83))//",
+        ]
+        for payload in payloads:
+            self._insert(payload)
+        response = self._listing()
+        self.assertEqual(200, response.code)
+        # None of the raw payload strings must appear verbatim in the HTML output
+        for payload in payloads:
+            with self.subTest(payload=payload):
+                self.assertNotIn(payload, response.body)
+        # Injection-specific tags from the payloads must be encoded, not rendered raw
+        self.assertNotIn("<svg ", response.body)
+        self.assertIn("&lt;svg", response.body)
+
+
 class TestSession(unittest.TestCase):
     def test_successful_login_sets_a_real_session_cookie(self):
         response = server.get("/login?username=admin&password=7en8aiDoh!")
