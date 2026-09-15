@@ -82,7 +82,9 @@ def expectations():
         },
         "Cross Site Scripting (reflected)": {
             "vuln": expect(contains=["v<b>0.4</b>"]),
-            "expl": expect(contains=['v<b>0.4<script>alert("arbitrary javascript")</script></b>']),
+            # After XSS fix: script tags must be HTML-escaped, not rendered raw
+            "expl": expect(contains=['v<b>0.4&lt;script&gt;alert(&quot;arbitrary javascript&quot;)&lt;/script&gt;</b>'],
+                           absent=['v<b>0.4<script>alert("arbitrary javascript")</script></b>']),
         },
         "Cross Site Scripting (stored)": {
             "vuln": expect(contains=["Comment(s)"]),
