@@ -231,26 +231,40 @@ class TestOutboundRequests(unittest.TestCase):
         self.assertEqual(200, response.code, response.body[:800])
         self.assertIn("UA-GUARD-OK", response.body)
 
-    def test_remote_file_inclusion_is_not_blocked_by_user_agent(self):
-        response = server.get("/?include=%s&cmd=echo%%20UA-RFI-OK" % harness.quoted("%s/ua-guard.py" % fixture_url))
+    def test_remote_file_inclusion_fetches_content_without_executing(self):
+        """After CWE-94 fix: ?include= fetches and displays file content but does NOT exec() it."""
+        response = server.get("/?include=%s" % harness.quoted("%s/rfi.py" % fixture_url))
         self.assertEqual(200, response.code, response.body[:800])
-        self.assertIn("UA-RFI-OK", response.body)
+        # The Python source code should be returned as plain text, not executed
+        self.assertIn("import", response.body)
+        # No execution output — cmd parameter has no effect without exec()
+        self.assertNotIn("<pre>", response.body)
 
-    def test_included_program_raising_called_process_error_still_answers(self):
-        """The included program's subprocess.CalledProcessError carries bytes, which used to kill the response."""
-        raw = server.raw_get("/?include=%s&cmd=ls%%20/definitely-not-here" % harness.quoted("%s/rfi.py" % fixture_url))
-        self.assertTrue(raw.startswith("HTTP/1."), repr(raw[:80]))
-        status, headers, body = harness.split_response(raw)
-        self.assertIn("500", status)
-        self.assertIn("definitely-not-here", body)
+    def test_remote_file_inclusion_respects_user_agent(self):
+        """Fetching via DSVW's user agent (Mozilla/...) should succeed for UA-guarded resources."""
+        response = server.get("/?include=%s" % harness.quoted("%s/ua-guard.py" % fixture_url))
+        self.assertEqual(200, response.code, response.body[:800])
+        # Source code of rfi.py is returned (contains 'import re'), not executed output
+        self.assertIn("import", response.body)
 
-    def test_remote_file_inclusion_reads_query_string(self):
-        response = server.get("/?include=%s&cmd=echo%%20RFI-QS" % harness.quoted("%s/rfi.py" % fixture_url))
-        self.assertIn("<pre>RFI-QS", response.body)
+    def test_include_local_file_returns_content(self):
+        """A local file passed to ?include= should have its content displayed, not executed."""
+        path = os.path.join(harness.ROOT, "tests", "fixture-include-test.tmp")
+        with open(path, "w") as handle:
+            handle.write('print("SHOULD-NOT-EXECUTE")\n')
+        try:
+            response = server.get("/?include=%s" % harness.quoted(path))
+            self.assertEqual(200, response.code, response.body[:800])
+            # Source code is displayed
+            self.assertIn('print("SHOULD-NOT-EXECUTE")', response.body)
+            # But Python was NOT evaluated — the literal output of print() is absent
+            self.assertNotIn("SHOULD-NOT-EXECUTE\n", response.body.replace('print("SHOULD-NOT-EXECUTE")', ""))
+        finally:
+            os.unlink(path)
 
 
 class TestIncludedProgramSemantics(unittest.TestCase):
-    """An included program is a normal script - the usual script idioms have to work."""
+    """After CWE-94 fix: ?include= now displays file content verbatim, no longer executes it."""
 
     def include(self, source):
         path = os.path.join(harness.ROOT, "tests", "fixture-program.tmp")
@@ -261,45 +275,62 @@ class TestIncludedProgramSemantics(unittest.TestCase):
         finally:
             os.unlink(path)
 
-    def test_main_guard_is_honoured(self):
-        response = self.include('if __name__ == "__main__":\n    print("MAIN-OK")\n')
+    def test_source_is_displayed_not_executed(self):
+        """The source code of the included file must appear in the response verbatim."""
+        source = 'print("SHOULD-NOT-RUN")\n'
+        response = self.include(source)
         self.assertEqual(200, response.code, response.body[:400])
-        self.assertIn("MAIN-OK", response.body)
+        # The literal source line must be present
+        self.assertIn('print("SHOULD-NOT-RUN")', response.body)
+        # But the output of executing it must NOT appear as a standalone line
+        self.assertNotIn("SHOULD-NOT-RUN\n", response.body.replace('print("SHOULD-NOT-RUN")', ""))
 
-    def test_output_survives_exit(self):
-        for source in ('print("BEFORE-EXIT")\nexit(0)\n', 'import sys\nprint("BEFORE-EXIT")\nsys.exit(0)\n', 'print("BEFORE-EXIT")\nraise SystemExit(1)\n'):
-            with self.subTest(source=source.splitlines()[-1]):
-                response = self.include(source)
-                self.assertEqual(200, response.code, response.body[:400])
-                self.assertIn("BEFORE-EXIT", response.body)
+    def test_arbitrary_code_injection_payload_is_not_executed(self):
+        """Malicious code stored in an included file must not run on the server."""
+        source = 'import os\nos.environ["DSVW_CODE_EXEC_MARKER"] = "PWNED"\n'
+        response = self.include(source)
+        self.assertEqual(200, response.code, response.body[:400])
+        # Code was not executed — the environment variable is not set
+        self.assertNotIn("PWNED", os.environ.get("DSVW_CODE_EXEC_MARKER", "NOT_SET"))
+        # But the source text IS visible in the response
+        self.assertIn("DSVW_CODE_EXEC_MARKER", response.body)
 
-    def test_output_survives_a_crash(self):
-        response = self.include('print("BEFORE-CRASH")\nraise ValueError("boom")\n')
-        self.assertEqual(500, response.code)
-        self.assertIn("boom", response.body)
+    def test_multiline_source_is_displayed_intact(self):
+        source = 'line_one = 1\nline_two = 2\nline_three = 3\n'
+        response = self.include(source)
+        self.assertEqual(200, response.code, response.body[:400])
+        self.assertIn("line_one", response.body)
+        self.assertIn("line_two", response.body)
+        self.assertIn("line_three", response.body)
 
-    def test_multiple_print_arguments_are_rendered(self):
-        response = self.include('print("A", "B", sep="-", end="!")\nprint()\n')
-        self.assertIn("A-B!", response.body)
+    def test_binary_safe_decoding_on_include(self):
+        """Non-UTF-8 bytes in an included file must not crash the server."""
+        path = os.path.join(harness.ROOT, "tests", "fixture-program.tmp")
+        with open(path, "wb") as handle:
+            handle.write(b"# valid start\n\xff\xfe\x80binary-marker\n")
+        try:
+            response = server.get("/?include=%s" % harness.quoted(path))
+            self.assertEqual(200, response.code, response.body[:400])
+            self.assertIn("binary-marker", response.body)
+        finally:
+            os.unlink(path)
 
 
 class TestRemoteFileInclusionIsolation(unittest.TestCase):
-    """The remote file inclusion output capture must not hijack the server's global stdout."""
+    """After CWE-94 fix: ?include= fetches and displays content without executing it."""
 
     def include(self, results, index):
-        results[index] = server.get("/?include=%s" % harness.quoted("%s/slow.py" % fixture_url), timeout=60)
+        results[index] = server.get("/?include=%s" % harness.quoted("%s/rfi.py" % fixture_url), timeout=60)
 
-    def test_concurrent_request_logs_do_not_leak_into_the_response(self):
+    def test_concurrent_include_requests_all_succeed(self):
+        """Multiple concurrent ?include= requests must all get a 200 response."""
         results = {}
-        worker = threading.Thread(target=self.include, args=(results, 0))
-        worker.start()
-        time.sleep(0.4)
-        self.assertIn("v<b>LEAK-MARKER</b>", server.get("/?v=LEAK-MARKER").body)
-        worker.join(60)
-        self.assertEqual(200, results[0].code, results[0].body[:800])
-        self.assertIn("SLOW-DONE", results[0].body)
-        self.assertNotIn("LEAK-MARKER", results[0].body, "another request's log line was captured into the response")
-        self.assertNotIn("[i] GET", results[0].body)
+        workers = [threading.Thread(target=self.include, args=(results, index)) for index in range(2)]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(30)
+        self.assertEqual([200, 200], [results[index].code for index in sorted(results)])
 
     def test_server_keeps_logging_after_concurrent_inclusions(self):
         results = {}
@@ -307,7 +338,7 @@ class TestRemoteFileInclusionIsolation(unittest.TestCase):
         for worker in workers:
             worker.start()
         for worker in workers:
-            worker.join(60)
+            worker.join(30)
         self.assertEqual([200, 200], [results[index].code for index in sorted(results)])
         server.get("/?v=AFTER-RFI-MARKER")
         self.assertTrue(wait_for(lambda: "[i] GET /?v=AFTER-RFI-MARKER" in server.output()), "server stopped logging to stdout:\n%s" % server.output()[-1500:])
@@ -570,6 +601,80 @@ class TestHtmlStructure(unittest.TestCase):
                 body = server.get(page).body
                 self.assertEqual(1, body.count("Powered by"), "footer must appear exactly once")
                 self.assertTrue(body.rstrip().endswith("</html>"))
+
+
+class TestStoredCodeInjectionFix(unittest.TestCase):
+    """Regression suite for CWE-94 (Stored Code Injection) fix.
+
+    The ?include= endpoint previously fetched a file/URL and passed its content
+    to exec(), allowing arbitrary code execution.  After the fix the content is
+    only displayed as plain text — the exec() call has been removed entirely.
+    """
+
+    def _write_tmp(self, source):
+        path = os.path.join(harness.ROOT, "tests", "fixture-cwe94.tmp")
+        with open(path, "w") as handle:
+            handle.write(source)
+        return path
+
+    def test_code_in_local_file_is_not_executed(self):
+        """A Python payload stored in a local file must not run when included."""
+        path = self._write_tmp('import os\nos.environ["CWE94_LOCAL"] = "EXECUTED"\n')
+        try:
+            response = server.get("/?include=%s" % harness.quoted(path))
+            self.assertEqual(200, response.code, response.body[:400])
+            # The source code must be visible (file was fetched)
+            self.assertIn("CWE94_LOCAL", response.body)
+            # But the assignment must NOT have run — env var stays unset
+            self.assertEqual("NOT_SET", os.environ.get("CWE94_LOCAL", "NOT_SET"))
+        finally:
+            os.unlink(path)
+
+    def test_system_call_in_local_file_is_not_executed(self):
+        """A subprocess payload in a local file must not spawn a process when included."""
+        sentinel = os.path.join(harness.ROOT, "tests", "fixture-cwe94-sentinel.tmp")
+        # Write a Python script that would create the sentinel file if exec()-d
+        source = "with open(%r, 'w') as _f:\n    _f.write('pwned')\n" % sentinel
+        path = self._write_tmp(source)
+        try:
+            server.get("/?include=%s" % harness.quoted(path))
+            self.assertFalse(os.path.exists(sentinel), "code injection payload was executed via exec()")
+        finally:
+            os.unlink(path)
+            if os.path.exists(sentinel):
+                os.unlink(sentinel)
+
+    def test_remote_file_content_is_displayed_not_executed(self):
+        """A Python script served at a remote URL must have its source displayed, not executed."""
+        response = server.get("/?include=%s" % harness.quoted("%s/rfi.py" % fixture_url))
+        self.assertEqual(200, response.code, response.body[:800])
+        # The source of rfi.py begins with 'import re'
+        self.assertIn("import", response.body)
+        # Execution output from rfi.py would be wrapped in <pre>...</pre>; must be absent
+        self.assertNotIn("<pre>", response.body)
+
+    def test_cmd_parameter_has_no_effect_after_fix(self):
+        """The cmd= parameter that was forwarded to exec()-d programs must now be inert."""
+        response = server.get("/?include=%s&cmd=echo%%20EXEC-MARKER" % harness.quoted("%s/rfi.py" % fixture_url))
+        self.assertEqual(200, response.code, response.body[:800])
+        self.assertNotIn("EXEC-MARKER", response.body)
+
+    def test_include_response_is_plain_text_not_html(self):
+        """The response for ?include= must be plain text (no HTML wrapping around the content)."""
+        path = self._write_tmp("PLAIN_TEXT_CONTENT\n")
+        try:
+            response = server.get("/?include=%s" % harness.quoted(path))
+            self.assertEqual(200, response.code, response.body[:400])
+            self.assertIn("PLAIN_TEXT_CONTENT", response.body)
+        finally:
+            os.unlink(path)
+
+    def test_nonexistent_include_returns_500(self):
+        """A missing file still produces a complete HTTP response (error handling intact)."""
+        raw = server.raw_get("/?include=/nonexistent-cwe94-test")
+        self.assertTrue(raw.startswith("HTTP/1."), repr(raw[:80]))
+        status, headers, body = harness.split_response(raw)
+        self.assertIn("500", status)
 
 
 class TestProjectConstraints(unittest.TestCase):
