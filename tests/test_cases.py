@@ -160,9 +160,8 @@ def expectations():
             "expl": expect(contains=["<title>Login</title>"]),          # raw response asserted separately
         },
         "Component with Known Vulnerability (pickle)": {
-            "subs": {"ping%20-c%205%20127.0.0.1": "true", "ping%20-n%205%20127.0.0.1": "true"},
             "vuln": expect(contains=["dricci", "ricci"]),
-            "expl": expect(contains=["0"]),
+            "expl": expect(contains=["__class__"]),
         },
         "Denial of Service (memory)": {
             "vuln": expect(contains=["Time required"]),
