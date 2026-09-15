@@ -30,7 +30,7 @@ class ReqHandler(http.server.BaseHTTPRequestHandler):
                 elif "domain" in params:
                     content = subprocess.run("nslookup " + params["domain"], shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.PIPE, text=True, errors="replace").stdout
                 elif "xml" in params:
-                    parser = lxml.etree.XMLParser(load_dtd=True, resolve_entities=True, no_network=False); parser.resolvers.add(RESOLVER()); content = lxml.etree.tostring(lxml.etree.parse(io.BytesIO(urllib.parse.unquote_to_bytes(re.search(r"(?:\A|[?&])xml=([^&]+)", query).group(1))), parser), pretty_print=True).decode()
+                    parser = lxml.etree.XMLParser(load_dtd=False, resolve_entities=False, no_network=True); content = lxml.etree.tostring(lxml.etree.parse(io.BytesIO(urllib.parse.unquote_to_bytes(re.search(r"(?:\A|[?&])xml=([^&]+)", query).group(1))), parser), pretty_print=True).decode()
                 elif "name" in params:
                     found = lxml.etree.parse(io.BytesIO(USERS_XML.encode())).xpath(".//user[name/text()='%s']" % params["name"])
                     content += "<b>Surname:</b> %s%s" % (found[-1].find("surname").text if found else "-", HTML_POSTFIX)
