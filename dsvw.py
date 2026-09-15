@@ -22,7 +22,7 @@ class ReqHandler(http.server.BaseHTTPRequestHandler):
                     cursor.execute("SELECT id, username, name, surname FROM users WHERE id=" + params["id"])
                     content += "<div><span>Result(s):</span></div><table><thead><tr><th>id</th><th>username</th><th>name</th><th>surname</th></tr></thead>%s</table>%s" % ("".join("<tr>%s</tr>" % "".join("<td>%s</td>" % ("-" if _ is None else _) for _ in row) for row in cursor.fetchall()), HTML_POSTFIX)
                 elif "v" in params:
-                    content += re.sub(r"(v<b>)[^<]+(</b>)", lambda match: "%s%s%s" % (match.group(1), params["v"], match.group(2)), HTML_POSTFIX)
+                    content += re.sub(r"(v<b>)[^<]+(</b>)", lambda match: "%s%s%s" % (match.group(1), html.escape(params["v"]), match.group(2)), HTML_POSTFIX)
                 elif "object" in params:
                     content = str(pickle.loads(urllib.parse.unquote_to_bytes(re.search(r"(?:\A|[?&])object=([^&]+)", query).group(1))))
                 elif "path" in params:
