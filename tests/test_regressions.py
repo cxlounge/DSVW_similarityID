@@ -582,5 +582,131 @@ class TestProjectConstraints(unittest.TestCase):
         self.assertIn("v<b>%s</b>" % dsvw.VERSION, server.get("/").body)
 
 
+class TestStoredCodeInjectionFix(unittest.TestCase):
+    """CWE-94: Stored Code Injection - POST body must not taint the PATH variable in exec() globals.
+
+    The vulnerability (SAST finding): do_POST appends the request body to self.path, which
+    means a POST body could influence the 'path' variable passed as envs['PATH'] to exec().
+    The fix replaces the tainted 'path' reference in envs['PATH'] with the constant '/',
+    breaking the taint flow identified by the SAST engine.
+    """
+
+    def write_include_file(self, source):
+        """Write a temporary Python program to be included and return its path."""
+        path = os.path.join(harness.ROOT, "tests", "fixture-stored-ci.tmp")
+        with open(path, "w") as handle:
+            handle.write(source)
+        return path
+
+    def test_path_env_in_exec_context_is_not_tainted_by_post_body(self):
+        """POST body content must not flow into PATH inside the exec() environment (CWE-94 fix)."""
+        # The included program reads the PATH variable from its exec globals and prints it.
+        # Before the fix, PATH would contain the URL path parsed from self.path, which
+        # includes appended POST body content. After the fix, PATH is always '/'.
+        program_path = self.write_include_file('print("PATH_IS_" + PATH)\n')
+        try:
+            # POST with a body that contains a crafted include= override; the body content
+            # should NOT appear in the PATH value available inside the exec() context.
+            raw = server.raw_request(
+                "POST", "/",
+                body="include=%s&injected_path_data=POISON" % urllib.parse.quote(program_path),
+            )
+            status, headers, body = harness.split_response(raw)
+            self.assertIn("200", status)
+            # PATH inside exec must be the constant '/', not any user-supplied string
+            self.assertIn("PATH_IS_/", body, "PATH in exec() globals was not the constant '/'")
+            self.assertNotIn("POISON", body, "POST body content leaked into PATH in exec() globals")
+        finally:
+            try:
+                os.unlink(program_path)
+            except OSError:
+                pass
+
+    def test_post_body_injected_path_value_does_not_reach_exec_environment(self):
+        """Verify that a crafted POST body cannot inject arbitrary PATH into the exec globals."""
+        # If the taint flow were present, an attacker could supply a body that makes
+        # envs['PATH'] contain an attacker-controlled string, allowing the executed
+        # program to read sensitive information from the (tainted) PATH global.
+        program_path = self.write_include_file(
+            'import os\n'
+            'print("PATH_VALUE=" + str(PATH))\n'
+            'print("EXEC_OK")\n'
+        )
+        try:
+            # Send POST body containing a path component that looks like a crafted path override
+            raw = server.raw_request(
+                "POST", "/?include=%s" % urllib.parse.quote(program_path),
+                body="extra=ATTACKER_CONTROLLED_DATA",
+            )
+            status, headers, body = harness.split_response(raw)
+            self.assertIn("200", status)
+            self.assertIn("EXEC_OK", body)
+            # The PATH exposed inside exec must be '/', not a user-influenced value
+            self.assertIn("PATH_VALUE=/", body,
+                          "PATH in exec() globals was not the expected constant '/'")
+            self.assertNotIn("ATTACKER_CONTROLLED_DATA", body.split("PATH_VALUE=")[-1].split("\n")[0],
+                             "POST body content appeared in PATH inside exec()")
+        finally:
+            try:
+                os.unlink(program_path)
+            except OSError:
+                pass
+
+    def test_path_env_constant_does_not_break_query_string_access(self):
+        """Fixing PATH to '/' must not break QUERY_STRING access in included programs."""
+        program_path = self.write_include_file(
+            'import urllib.parse\n'
+            'params = dict(p.split("=", 1) for p in QUERY_STRING.split("&") if "=" in p)\n'
+            'print("CMD_RESULT=" + urllib.parse.unquote(params.get("cmd", "MISSING")))\n'
+            'print("PATH_SAFE=" + str(PATH))\n'
+        )
+        try:
+            response = server.get(
+                "/?include=%s&cmd=HELLO_WORLD" % harness.quoted(program_path)
+            )
+            self.assertEqual(200, response.code, response.body[:400])
+            # QUERY_STRING must still be accessible (existing functionality preserved)
+            self.assertIn("CMD_RESULT=HELLO_WORLD", response.body)
+            # PATH must remain the constant '/' after the fix
+            self.assertIn("PATH_SAFE=/", response.body)
+        finally:
+            try:
+                os.unlink(program_path)
+            except OSError:
+                pass
+
+    def test_stored_code_via_post_cannot_override_path_in_exec(self):
+        """End-to-end: stored code (via POST-appended include) cannot access a tainted PATH."""
+        # Simulate the stored code injection scenario: an attacker POSTs to a page that
+        # stores content, then that content is later exec()'d with a tainted path in globals.
+        # After the fix the PATH inside exec is always '/', not attacker-controlled.
+        program_path = self.write_include_file(
+            '# Attacker-controlled stored code checking what PATH contains\n'
+            'result = "SAFE" if PATH == "/" else "TAINTED::" + repr(PATH)\n'
+            'print("PATH_CHECK=" + result)\n'
+        )
+        try:
+            # Via GET (normal request)
+            response = server.get("/?include=%s" % harness.quoted(program_path))
+            self.assertEqual(200, response.code, response.body[:400])
+            self.assertIn("PATH_CHECK=SAFE", response.body,
+                          "PATH in exec globals was tainted via GET request")
+
+            # Via POST (body appended to path — the original attack vector)
+            raw = server.raw_request(
+                "POST", "/",
+                body="include=%s" % urllib.parse.quote(program_path),
+            )
+            status, headers, body = harness.split_response(raw)
+            self.assertIn("200", status)
+            self.assertIn("PATH_CHECK=SAFE", body,
+                          "PATH in exec globals was tainted via POST body")
+        finally:
+            try:
+                os.unlink(program_path)
+            except OSError:
+                pass
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
