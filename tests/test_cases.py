@@ -208,11 +208,15 @@ class TestCases(unittest.TestCase):
                     if rule["min_elapsed"]:
                         self.assertGreater(response.elapsed, rule["min_elapsed"], "%s (%s): response was not delayed" % (name, kind))
 
-    def test_stored_xss_survives_in_comment_listing(self):
+    def test_stored_xss_is_escaped_in_comment_listing(self):
+        # Stored XSS payloads must be HTML-escaped when displayed, not rendered as raw HTML.
         payload = '<script>alert("stored-xss-marker")</script>'
         server.get("/?comment=%s" % harness.quoted(payload))
         response = server.get("/?comment=")
-        self.assertIn(payload, response.body)
+        # The raw script tag must NOT appear in the response (it would execute in the browser).
+        self.assertNotIn(payload, response.body)
+        # The comment text must appear HTML-escaped so it is visible as plain text, not executable.
+        self.assertIn("&lt;script&gt;", response.body)
 
     def test_unvalidated_redirect_sends_location(self):
         response = server.get(cases()["Unvalidated Redirect"][1])

@@ -340,6 +340,64 @@ class TestComments(unittest.TestCase):
         self.assertIn("Thank you for leaving the comment", server.get("/?comment=another").body)
 
 
+class TestStoredXssRemediation(unittest.TestCase):
+    """Regression tests for the stored XSS fix: database-sourced comment data must be
+    HTML-escaped before being written to the response (CWE-79)."""
+
+    def _insert_and_list(self, comment_text):
+        """Helper: store a comment and return the listing page body."""
+        server.get("/?comment=%s" % harness.quoted(comment_text))
+        return server.get("/?comment=").body
+
+    def test_script_tag_in_comment_is_html_escaped(self):
+        """A <script> payload stored in a comment must not appear as raw HTML in the listing."""
+        payload = '<script>alert("xss-regression")</script>'
+        body = self._insert_and_list(payload)
+        # Raw tag must never reach the browser as executable HTML.
+        self.assertNotIn(payload, body)
+        # The encoded form must appear so the text is still visible as plain content.
+        self.assertIn("&lt;script&gt;", body)
+
+    def test_event_handler_attribute_in_comment_is_html_escaped(self):
+        """An event-handler injection payload must be neutralised by HTML encoding."""
+        payload = '<img src=x onerror=alert(1)>'
+        body = self._insert_and_list(payload)
+        self.assertNotIn(payload, body)
+        self.assertIn("&lt;img", body)
+
+    def test_ampersand_and_quotes_in_comment_are_html_escaped(self):
+        """HTML special characters in comments must be encoded so they cannot break out of the <td> context."""
+        payload = 'Tom & Jerry said "hello" <world>'
+        body = self._insert_and_list(payload)
+        # The raw characters that trigger HTML parsing must be encoded.
+        self.assertNotIn("<world>", body)
+        self.assertIn("Tom &amp; Jerry", body)
+        self.assertIn("&lt;world&gt;", body)
+
+    def test_plain_text_comment_is_still_displayed(self):
+        """Normal comments without special characters must still appear verbatim."""
+        payload = "hello world comment"
+        body = self._insert_and_list(payload)
+        self.assertIn("hello world comment", body)
+        self.assertIn("Comment(s)", body)
+
+    def test_comment_listing_page_is_valid_html(self):
+        """The listing page must still start with the HTML preamble after the fix."""
+        server.get("/?comment=validity-check")
+        body = server.get("/?comment=").body
+        self.assertTrue(body.startswith("<!DOCTYPE html>"), "response is not an HTML page")
+        self.assertIn("</html>", body)
+
+    def test_numeric_id_and_timestamp_are_preserved(self):
+        """Non-comment columns (id, time) must still appear in the table after the fix."""
+        server.get("/?comment=timestamp-test")
+        body = server.get("/?comment=").body
+        self.assertIn("<th>id</th>", body)
+        self.assertIn("<th>time</th>", body)
+        # The id column is an integer — it must still render as a digit.
+        self.assertRegex(body, r"<td>\d+</td>")
+
+
 class TestSession(unittest.TestCase):
     def test_successful_login_sets_a_real_session_cookie(self):
         response = server.get("/login?username=admin&password=7en8aiDoh!")
