@@ -172,24 +172,43 @@ class TestXmlDecoding(unittest.TestCase):
         response = server.get("/?xml=%s" % urllib.parse.quote('<root>caf\xe9</root>'.encode(), safe=""))
         self.assertIn("caf&#233;", response.body)
 
-    def test_remote_entity_is_expanded(self):
-        """libxml2 >= 2.13 (i.e. every recent 'pip install lxml') dropped HTTP, so DSVW has to fetch entities itself."""
+    def test_remote_entity_is_not_expanded(self):
+        """XXE fix: external entity references must NOT be resolved (CWE-611).
+
+        With resolve_entities=False and load_dtd=False the parser must not
+        fetch the remote URL or include its content in the response.
+        """
         document = '<!DOCTYPE x [<!ENTITY xxe SYSTEM "%s/xxe.txt">]><root>&xxe;</root>' % fixture_url
         response = server.get("/?xml=%s" % urllib.parse.quote(document, safe=""))
-        self.assertEqual(200, response.code, response.body[:400])
-        self.assertIn("XXE-REMOTE-OK", response.body)
+        # The server must not return the content of the external resource.
+        self.assertNotIn("XXE-REMOTE-OK", response.body)
 
-    def test_remote_entity_uses_the_servers_own_fetcher(self):
-        """Proves the entity is retrieved by DSVW (browser User-Agent) instead of libxml2's own HTTP client."""
-        document = '<!DOCTYPE x [<!ENTITY xxe SYSTEM "%s/ua-guard.txt">]><root>&xxe;</root>' % fixture_url
+    def test_local_file_entity_is_not_expanded(self):
+        """XXE fix: local SYSTEM entity references must NOT resolve to file contents (CWE-611).
+
+        An attacker must not be able to read /etc/passwd or any other local
+        file via a DTD SYSTEM entity.
+        """
+        if os.name == "nt":
+            self.skipTest("POSIX only")
+        document = '<!DOCTYPE x [<!ENTITY e SYSTEM "file:///etc/passwd">]><root>&e;</root>'
         response = server.get("/?xml=%s" % urllib.parse.quote(document, safe=""))
-        self.assertEqual(200, response.code, response.body[:400])
-        self.assertIn("UA-GUARD-OK", response.body)
+        # The contents of /etc/passwd must never appear in the response.
+        self.assertNotIn("root:", response.body)
 
-    def test_local_entity_expansion_still_works(self):
-        response = server.get("/?xml=%s" % urllib.parse.quote('<!DOCTYPE x [<!ENTITY e SYSTEM "file:///etc/hostname">]><root>&e;</root>', safe=""))
+    def test_dtd_with_internal_entities_does_not_expose_sensitive_data(self):
+        """XXE fix: even well-formed inline DTD entities must not be expanded when DTD is disabled."""
+        document = '<!DOCTYPE x [<!ENTITY secret "SENSITIVE-DATA">]><root>&secret;</root>'
+        response = server.get("/?xml=%s" % urllib.parse.quote(document, safe=""))
+        # When load_dtd=False the entity reference should not be replaced.
+        self.assertNotIn("SENSITIVE-DATA", response.body)
+
+    def test_plain_xml_without_entities_is_still_parsed(self):
+        """Safe XML without DTD/entities must continue to be served correctly."""
+        response = server.get("/?xml=%s" % urllib.parse.quote('<root><item>hello</item></root>'.encode(), safe=""))
         self.assertEqual(200, response.code, response.body[:400])
         self.assertIn("<root>", response.body)
+        self.assertIn("<item>hello</item>", response.body)
 
 
 class TestCommandExecution(unittest.TestCase):
