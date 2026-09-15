@@ -4,6 +4,7 @@
 
 import html.parser
 import importlib.util
+import json
 import os
 import pickle
 import re
@@ -117,28 +118,52 @@ class TestReflectedVersion(unittest.TestCase):
         self.assertTrue(response.body.rstrip().endswith("</html>"))
 
 
-class TestPickleDemo(unittest.TestCase):
+class TestObjectDemo(unittest.TestCase):
+    """Tests for the ?object= endpoint, now using safe JSON deserialization instead of pickle."""
+
     @staticmethod
-    def users_object(protocol=None):
-        users = dict((_.findtext("username"), (_.findtext("name"), _.findtext("surname"))) for _ in xml.etree.ElementTree.fromstring(dsvw.USERS_XML).findall("user"))
-        return urllib.parse.quote(pickle.dumps(users) if protocol is None else pickle.dumps(users, protocol))
+    def users_object():
+        users = dict((_.findtext("username"), [_.findtext("name"), _.findtext("surname")]) for _ in xml.etree.ElementTree.fromstring(dsvw.USERS_XML).findall("user"))
+        return urllib.parse.quote(json.dumps(users))
 
     def test_shipped_object_demo_deserializes(self):
+        """JSON-encoded user dict round-trips correctly."""
         response = server.get("/?object=%s" % self.users_object())
         self.assertEqual(200, response.code, response.body[:800])
         self.assertIn("dricci", response.body)
 
-    def test_every_pickle_protocol_round_trips(self):
-        for protocol in range(0, pickle.HIGHEST_PROTOCOL + 1):
-            with self.subTest(protocol=protocol):
-                response = server.get("/?object=%s" % self.users_object(protocol))
-                self.assertEqual(200, response.code, response.body[:400])
-                self.assertIn("dricci", response.body)
-
-    def test_arbitrary_code_execution_payload_still_works(self):
-        response = server.get("/?object=%s" % urllib.parse.quote("cos\nsystem\n(S'true'\ntR."))
+    def test_valid_json_string_is_deserialized(self):
+        """A simple JSON string value is returned as its Python representation."""
+        payload = urllib.parse.quote(json.dumps("hello world"))
+        response = server.get("/?object=%s" % payload)
         self.assertEqual(200, response.code, response.body[:400])
-        self.assertEqual("0", response.body.strip())
+        self.assertIn("hello world", response.body)
+
+    def test_valid_json_number_is_deserialized(self):
+        """A JSON number is returned as its Python representation."""
+        payload = urllib.parse.quote(json.dumps(42))
+        response = server.get("/?object=%s" % payload)
+        self.assertEqual(200, response.code, response.body[:400])
+        self.assertIn("42", response.body)
+
+    def test_pickle_rce_payload_is_rejected(self):
+        """A raw pickle RCE payload must no longer execute — json.loads raises an error instead."""
+        # This payload would execute `true` via pickle's REDUCE opcode:
+        # cos\nsystem\n(S'true'\ntR.
+        rce_payload = urllib.parse.quote("cos\nsystem\n(S'true'\ntR.")
+        response = server.get("/?object=%s" % rce_payload)
+        # The server must return HTTP 500 (json.loads raises ValueError/JSONDecodeError),
+        # NOT HTTP 200 with the command exit code "0".
+        self.assertEqual(500, response.code, "Pickle RCE payload should raise a JSON decode error, not succeed")
+        self.assertNotEqual("0", response.body.strip(), "Pickle RCE payload must not return command exit code '0'")
+
+    def test_binary_pickle_payload_is_rejected(self):
+        """Raw binary pickle bytes must not be deserialized — json.loads rejects non-JSON bytes."""
+        users = dict((_.findtext("username"), (_.findtext("name"), _.findtext("surname"))) for _ in xml.etree.ElementTree.fromstring(dsvw.USERS_XML).findall("user"))
+        binary_pickle_payload = urllib.parse.quote(pickle.dumps(users))
+        response = server.get("/?object=%s" % binary_pickle_payload)
+        # json.loads must raise a JSONDecodeError for binary pickle data
+        self.assertEqual(500, response.code, "Binary pickle payload must not be deserialized")
 
 
 class TestFileDisclosure(unittest.TestCase):
