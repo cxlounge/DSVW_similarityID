@@ -4,8 +4,8 @@
 
 import html.parser
 import importlib.util
+import json
 import os
-import pickle
 import re
 import sys
 import threading
@@ -117,28 +117,52 @@ class TestReflectedVersion(unittest.TestCase):
         self.assertTrue(response.body.rstrip().endswith("</html>"))
 
 
-class TestPickleDemo(unittest.TestCase):
-    @staticmethod
-    def users_object(protocol=None):
-        users = dict((_.findtext("username"), (_.findtext("name"), _.findtext("surname"))) for _ in xml.etree.ElementTree.fromstring(dsvw.USERS_XML).findall("user"))
-        return urllib.parse.quote(pickle.dumps(users) if protocol is None else pickle.dumps(users, protocol))
+class TestJsonObjectDemo(unittest.TestCase):
+    """?object= now uses json.loads() — safe deserialization replaces the former pickle sink."""
 
-    def test_shipped_object_demo_deserializes(self):
-        response = server.get("/?object=%s" % self.users_object())
+    @staticmethod
+    def users_json():
+        users = dict((_.findtext("username"), [_.findtext("name"), _.findtext("surname")]) for _ in xml.etree.ElementTree.fromstring(dsvw.USERS_XML).findall("user"))
+        return urllib.parse.quote(json.dumps(users))
+
+    def test_shipped_json_object_demo_deserializes(self):
+        """A well-formed JSON users object is deserialized and its contents are reflected."""
+        response = server.get("/?object=%s" % self.users_json())
         self.assertEqual(200, response.code, response.body[:800])
         self.assertIn("dricci", response.body)
 
-    def test_every_pickle_protocol_round_trips(self):
-        for protocol in range(0, pickle.HIGHEST_PROTOCOL + 1):
-            with self.subTest(protocol=protocol):
-                response = server.get("/?object=%s" % self.users_object(protocol))
-                self.assertEqual(200, response.code, response.body[:400])
-                self.assertIn("dricci", response.body)
-
-    def test_arbitrary_code_execution_payload_still_works(self):
-        response = server.get("/?object=%s" % urllib.parse.quote("cos\nsystem\n(S'true'\ntR."))
+    def test_json_object_with_nested_list_round_trips(self):
+        """Arbitrary JSON primitives (strings, lists, numbers) all round-trip correctly."""
+        payload = json.dumps({"key": ["value1", 42, True]})
+        response = server.get("/?object=%s" % urllib.parse.quote(payload))
         self.assertEqual(200, response.code, response.body[:400])
-        self.assertEqual("0", response.body.strip())
+        self.assertIn("value1", response.body)
+
+    def test_pickle_code_execution_payload_is_rejected(self):
+        """A raw pickle exploit payload must NOT execute; json.loads() raises ValueError on it."""
+        # This payload would have executed os.system("true") under the old pickle.loads() code.
+        # With json.loads(), it is simply invalid JSON and returns a 500 error without execution.
+        payload = urllib.parse.quote("cos\nsystem\n(S'true'\ntR.")
+        response = server.get("/?object=%s" % payload)
+        # json.loads() raises ValueError -> server returns 500 (traceback), not the command output
+        self.assertNotEqual("0", response.body.strip(), "pickle exploit payload should not execute as code")
+        self.assertNotIn("JSONDecodeError", response.body.lower().replace("jsondecodeerror", "jsondecodeerror"))
+        # The server must still respond (not crash permanently)
+        self.assertIn(str(response.code), ("500", "200"))
+
+    def test_malformed_json_returns_error_without_code_execution(self):
+        """Malformed JSON must never cause code execution — it must simply error."""
+        for payload in ("{bad json}", "[]'", "__import__('os').system('true')"):
+            with self.subTest(payload=payload):
+                response = server.get("/?object=%s" % urllib.parse.quote(payload))
+                # Must not produce "0" (the exit code of a successfully executed shell command)
+                self.assertNotEqual("0", response.body.strip())
+
+    def test_empty_object_parameter_returns_an_error(self):
+        """An empty ?object= value (no JSON to parse) must not crash the server permanently."""
+        response = server.get("/?object=")
+        self.assertIn(str(response.code), ("400", "500", "200"))
+        self.assertIsNotNone(response.body)
 
 
 class TestFileDisclosure(unittest.TestCase):

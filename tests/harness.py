@@ -148,7 +148,7 @@ class Dsvw:
 
 def interpreters(minimum=(3, 7)):
     """Every usable python3.x interpreter on the box (missing pyenv shims and incomplete builds are skipped)."""
-    probe = "import sys, html, http.client, http.server, io, json, os, pickle, random, re, socket, socketserver, sqlite3, string, subprocess, time, traceback, urllib.parse, urllib.request, xml.etree.ElementTree; sys.exit(0 if sys.version_info[:2] >= %r else 1)" % (minimum,)
+    probe = "import sys, html, http.client, http.server, io, json, os, random, re, socket, socketserver, sqlite3, string, subprocess, time, traceback, urllib.parse, urllib.request, xml.etree.ElementTree; sys.exit(0 if sys.version_info[:2] >= %r else 1)" % (minimum,)
     result = []
     for minor in range(minimum[1], 14):
         path = shutil.which("python3.%d" % minor)
