@@ -151,9 +151,11 @@ def expectations():
             "expl": expect(contains=["root:x:0:0"] if POSIX else ["for 16-bit app support"]),
         },
         "File Inclusion (remote)": {
+            # After CWE-94 fix: the remote file's source is displayed as text, not executed.
+            # The cmd= parameter no longer triggers code execution.
             "subs": {"https%3A%2F%2Fpastebin.com%2Fraw%2F6VyyNNhc": "@/rfi.py", "cmd=ifconfig": "cmd=echo%20RFI-MARKER", "cmd=ipconfig": "cmd=echo%20RFI-MARKER"},
             "vuln": expect(contains=["Attacks:"]),
-            "expl": expect(contains=["<pre>RFI-MARKER"]),
+            "expl": expect(contains=["import"]),
         },
         "HTTP Header Injection (phishing)": {
             "vuln": expect(contains=["Attacks:"]),
