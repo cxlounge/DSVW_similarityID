@@ -407,6 +407,80 @@ class TestComments(unittest.TestCase):
         self.assertIn("Thank you for leaving the comment", server.get("/?comment=another").body)
 
 
+class TestStoredXssRemediation(unittest.TestCase):
+    """CWE-79: Stored XSS via the comment field must be neutralised when comments are listed.
+
+    After the fix, html.escape() is applied to every value fetched from the
+    comments table before it is embedded in the HTML response.  These tests
+    verify that the taint flow from the data-store to the rendered page is
+    broken.
+    """
+
+    def _store_and_list(self, payload):
+        """Submit *payload* as a comment, then retrieve the comment-list page."""
+        server.get("/?comment=%s" % urllib.parse.quote(payload, safe=""))
+        return server.get("/?comment=")
+
+    def test_script_tag_in_comment_is_html_encoded(self):
+        """A stored <script> tag must not appear verbatim in the listing response."""
+        payload = '<script>alert("xss")</script>'
+        response = self._store_and_list(payload)
+        self.assertEqual(200, response.code)
+        # The raw tag must NOT appear – that would be the exploitable form.
+        self.assertNotIn("<script>alert", response.body)
+        # The *encoded* form must appear, confirming the value is stored and shown.
+        self.assertIn("&lt;script&gt;", response.body)
+
+    def test_event_handler_attribute_in_comment_is_html_encoded(self):
+        """An injected event-handler attribute must be HTML-encoded, not rendered as markup."""
+        payload = '" onmouseover="alert(1)'
+        response = self._store_and_list(payload)
+        self.assertEqual(200, response.code)
+        # The unescaped double-quote-plus-event-handler must not appear in the output.
+        self.assertNotIn('" onmouseover=', response.body)
+        # The HTML-encoded ampersand proves escaping happened.
+        self.assertIn("&quot;", response.body)
+
+    def test_img_onerror_payload_is_html_encoded(self):
+        """A classic <img onerror=...> vector must be encoded before reaching the page."""
+        payload = "<img src=x onerror=alert(1)>"
+        response = self._store_and_list(payload)
+        self.assertEqual(200, response.code)
+        self.assertNotIn("<img src=x onerror=", response.body)
+        self.assertIn("&lt;img", response.body)
+
+    def test_ampersand_and_angle_brackets_are_encoded(self):
+        """Basic HTML metacharacters must be encoded to &amp;, &lt;, &gt;."""
+        payload = "a & b < c > d"
+        response = self._store_and_list(payload)
+        self.assertEqual(200, response.code)
+        self.assertIn("a &amp; b &lt; c &gt; d", response.body)
+
+    def test_plain_text_comment_is_still_visible(self):
+        """A benign comment without HTML metacharacters must be shown unchanged."""
+        payload = "hello world 123"
+        response = self._store_and_list(payload)
+        self.assertEqual(200, response.code)
+        self.assertIn("hello world 123", response.body)
+
+    def test_response_page_is_valid_html_after_xss_payload(self):
+        """After a stored XSS payload the page structure must remain intact."""
+        payload = '<script>document.body.innerHTML=""</script>'
+        response = self._store_and_list(payload)
+        self.assertEqual(200, response.code)
+        # Page must still contain the structural markers indicating normal rendering.
+        self.assertIn("Comment(s)", response.body)
+        self.assertTrue(response.body.rstrip().endswith("</html>"),
+                        "page does not end with </html> after XSS payload")
+
+    def test_null_byte_in_comment_does_not_break_response(self):
+        """A comment containing a null byte (\\x00) must not crash the server."""
+        payload = "null\x00byte"
+        response = self._store_and_list(payload)
+        self.assertIn(response.code, (200, 500),
+                      "unexpected status code %d" % response.code)
+
+
 class TestSession(unittest.TestCase):
     def test_successful_login_sets_a_real_session_cookie(self):
         response = server.get("/login?username=admin&password=7en8aiDoh!")
